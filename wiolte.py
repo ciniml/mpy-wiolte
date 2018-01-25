@@ -121,8 +121,30 @@ class LTEModule(object):
             if len(responses) == 0: return False
             if result: return True
             pyb.delay(1000)
-        
-        
+    
+    def get_IMEI(self) -> str:
+        "Gets International Mobile Equipment Identity (IMEI)"
+        response = self.execute_comand_single_response(b'AT+GSN')
+        return str(response, 'utf-8') if response is not None else None
+    
+    def get_IMSI(self) -> str:
+        "Gets International Mobile Subscriber Identity (IMSI)"
+        response = self.execute_comand_single_response(b'AT+CIMI')
+        return str(response, 'utf-8') if response is not None else None
+
+    def get_phone_number(self) -> str:
+        "Gets phone number (subscriber number)"
+        response = self.execute_comand_single_response(b'AT+CNUM', b'+CNUM:')
+        return str(response[6:], 'utf-8') if response is not None else None
+
+    def get_RSSI(self) -> int:
+        "Gets received signal strength indication (RSSI)"
+        response = self.execute_comand_single_response(b'AT+CSQ', b'+CSQ:')
+        try:
+            return int(str(response[5:], 'utf-8')) if response is not None else None
+        except ValueError:
+            return None
+    
     def is_busy(self) -> bool:
         return bool(self.__pin_module_status.value())
 
@@ -205,6 +227,22 @@ class LTEModule(object):
                 return (True, responses)
             index += length
 
+    def execute_comand_single_response(self, command:bytes, starts_with:bytes=None) -> bytes:
+        buffer = bytearray(1024)
+        result, responses = self.execute_command(command, buffer)
+        if not result: return None
+        starts_with_length = len(starts_with) if starts_with is not None else 0
+
+        for response in responses:
+            if starts_with_length == 0 and len(response) > 0:
+                response = bytes(response)
+                self.__l.debug('-> %s', response)
+                return response
+            if starts_with_length > 0 and len(response) >= starts_with_length and response[:starts_with_length] == starts_with:
+                response = bytes(response)
+                self.__l.debug('-> %s', response)
+                return response
+        return None
         
 
 wiolte = WioLTE()
