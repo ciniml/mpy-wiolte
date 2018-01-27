@@ -237,7 +237,7 @@ class LTEModule(object):
             raise LTEModuleError('No connection resources available.')
 
         # Open socket.
-        command = bytes('AT+QIOPEN=1,{0},"{1}","{2}",{3}'.format(connect_id, socket_type_name, host, port), 'utf-8')
+        command = bytes('AT+QIOPEN=1,{0},"{1}","{2}",{3},0,0'.format(connect_id, socket_type_name, host, port), 'utf-8')
         if not self.write_command_wait(command, b'OK'):
             raise LTEModuleError('Failed to open socket.')
         if self.wait_response(bytes('+QIOPEN: {0},0'.format(connect_id), 'utf-8')) is None:
@@ -275,11 +275,14 @@ class LTEModule(object):
         if response is None:
             return None
         actual_length = int(str(response[7:], 'utf-8'))
+        self.__l.debug('receive length=%d', actual_length)
         if actual_length == 0:
-            return 0
+            return 0 if self.wait_response(b'OK') is not None else None
         mv = memoryview(buffer)
-        self.__uart.readinto(mv[offset:offset+length], actual_length)
-        return actual_length if self.wait_response(b'OK') is not None else None
+        bytes_read = self.__uart.readinto(mv[offset:offset+length], actual_length)
+        self.__l.debug('bytes read=%d', bytes_read)
+        self.__l.debug('bytes=%s', buffer[offset:offset+length])
+        return actual_length if bytes_read == actual_length and self.wait_response(b'OK') is not None else None
     
     
     def is_busy(self) -> bool:
@@ -308,7 +311,7 @@ class LTEModule(object):
         while True:
             c = self.__uart.readchar()
             if c < 0: return None  # Timed out
-            #self.__l.debug('S:%d R:%c', state, c)
+            self.__l.debug('S:%d R:%c', state, c)
             if state == 0 and c == LTEModule.CR:
                 state = 1
             elif state == 1 and c == LTEModule.LF:
@@ -319,7 +322,10 @@ class LTEModule(object):
                 response_length = 0
                 state = 0
             elif state == 2 and c == LTEModule.CR:
-                state = 4
+                if response_length == 0:
+                    state = 1
+                else:
+                    state = 4
             elif state == 2 and c != LTEModule.CR:
                 buffer[offset+response_length] = c
                 response_length += 1
@@ -337,6 +343,7 @@ class LTEModule(object):
         return (response, length)
     
     def wait_response(self, expected_response:bytes, timeout:int=None, max_response_size:int=1024) -> bytes:
+        self.__l.debug('wait_response: target=%s', expected_response)
         response = bytearray(max_response_size)
         expected_length = len(expected_response)
         while True:
