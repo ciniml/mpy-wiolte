@@ -9,15 +9,21 @@ m = LTEModule()
 m.initialize()
 m.set_supply_power(True)
 
-def make_publish(buffer:bytearray, topic:str) -> int:
+def make_publish(buffer:bytearray, topic:str, payload:bytes=None, payload_length:int=None) -> int:
     topic_bytes = bytes(topic, 'utf-8')
     topic_length = len(topic_bytes)
+    payload_length = 0 if payload is None else (len(payload) if payload_length is None else payload_length)
+    remaining_length = topic_length + 2 + (payload_length + 2 if payload_length > 0 else 0)
     buffer[0] = 0x30
-    buffer[1] = topic_length + 2
+    buffer[1] = remaining_length
     buffer[2] = 0
     buffer[3] = topic_length
     buffer[4:4+topic_length] = topic_bytes
-    return topic_length + 2 + 2
+    buffer[4+topic_length] = 0
+    buffer[4+topic_length] = payload_length
+    if payload_length > 0:
+        buffer[6+topic_length:6+topic_length+payload_length] = payload[:payload_length]
+    return remaining_length + 2
 
 if m.turn_on_or_reset():
     print('LTE connection is now available.')
@@ -47,6 +53,6 @@ if m.turn_on_or_reset():
         if n == 4: break
         pyb.delay(100)
     
-    length = make_publish(buffer, 'devices/wiolte/messages/events/')
+    length = make_publish(buffer, 'devices/wiolte/messages/events/', b'Hello from MicroPython on WioLTE')
     m.socket_send(conn, buffer, length=length)
 
