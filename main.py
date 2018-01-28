@@ -2,6 +2,12 @@ from wiolte import LTEModule
 import pyb
 import logging
 import struct
+from asyn import cancellable
+import uasyncio as asyncio
+
+def reset():
+    pyb.sync()
+    machine.soft_reset()
 
 logging.basicConfig(logging.DEBUG)
 
@@ -25,12 +31,15 @@ def make_publish(buffer:bytearray, topic:str, payload:bytes=None, payload_length
         buffer[6+topic_length:6+topic_length+payload_length] = payload[:payload_length]
     return remaining_length + 2
 
-if m.turn_on_or_reset():
+async def main_task():
+    while not await m.turn_on_or_reset():
+        await asyncio.sleep_ms(1000)
+    
     print('LTE connection is now available.')
-    print(m.get_RSSI())
+    print(await m.get_RSSI())
 
-    m.activate('soracom.io', 'sora', 'sora')
-    conn = m.socket_open('beam.soracom.io', 1883, m.SOCKET_TCP)
+    await m.activate('soracom.io', 'sora', 'sora')
+    conn = await m.socket_open('beam.soracom.io', 1883, m.SOCKET_TCP)
     print('Connection to SORACOM Beam = {0}'.format(conn))
     
     connect_packet = bytearray(1024)
@@ -46,13 +55,19 @@ if m.turn_on_or_reset():
     connect_packet[14] = 0
     connect_packet[15] = 6
     connect_packet[16:22] = b'wiolte'
-    m.socket_send(conn, connect_packet, offset=0, length=22)
+    await m.socket_send(conn, connect_packet, offset=0, length=22)
     buffer = bytearray(1024)
     for i in range(10):
-        n = m.socket_receive(conn, buffer)
+        n = await m.socket_receive(conn, buffer)
         if n == 4: break
-        pyb.delay(100)
+        await asyncio.sleep_ms(100)
     
-    length = make_publish(buffer, 'devices/wiolte/messages/events/', b'Hello from MicroPython on WioLTE')
-    m.socket_send(conn, buffer, length=length)
+    while True:
+        length = make_publish(buffer, 'devices/wiolte/messages/events/', b'Hello from MicroPython on WioLTE')
+        if not await m.socket_send(conn, buffer, length=length):
+            break
+        await asyncio.sleep_ms(5000)
+    
+loop = asyncio.get_event_loop()
+loop.run_until_complete(main_task())
 
