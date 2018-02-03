@@ -9,6 +9,25 @@ m = LTEModule()
 m.initialize()
 m.set_supply_power(True)
 
+def make_connect(buffer:bytearray, client_name:str) -> int:
+    client_name_bytes = bytes(client_name, 'utf-8')
+    client_name_length = len(client_name_bytes)
+    remaining_length = client_name_length
+    buffer[0] = 0x10                # CONNECT
+    buffer[1] = remaining_length    # remaining_length
+    buffer[2] = 0               # Protocol Name
+    buffer[3] = 6               # 
+    buffer[4:10] = b'MQIsdp'    # 
+    buffer[10] = 3              # Protocol Version
+    buffer[11] = 0x02           # Flags
+    buffer[12] = 0x00           #
+    buffer[13] = 0x0a           #
+    buffer[14] = 0                                          # Client Name
+    buffer[15] = client_name_length                         #
+    buffer[16:16+client_name_length] = client_name_bytes    #
+
+    return remaining_length + 2
+
 def make_publish(buffer:bytearray, topic:str, payload:bytes=None, payload_length:int=None) -> int:
     topic_bytes = bytes(topic, 'utf-8')
     topic_length = len(topic_bytes)
@@ -33,21 +52,10 @@ if m.turn_on_or_reset():
     conn = m.socket_open('beam.soracom.io', 1883, m.SOCKET_TCP)
     print('Connection to SORACOM Beam = {0}'.format(conn))
     
-    connect_packet = bytearray(1024)
-    connect_packet[0] = 0x10
-    connect_packet[1] = 20  # Remain length
-    connect_packet[2] = 0
-    connect_packet[3] = 6
-    connect_packet[4:10] = b'MQIsdp'
-    connect_packet[10] = 3
-    connect_packet[11] = 0x02
-    connect_packet[12] = 0x00
-    connect_packet[13] = 0x0a
-    connect_packet[14] = 0
-    connect_packet[15] = 6
-    connect_packet[16:22] = b'wiolte'
-    m.socket_send(conn, connect_packet, offset=0, length=22)
     buffer = bytearray(1024)
+    length = make_connect(buffer, "wiolte")
+    m.socket_send(conn, buffer, offset=0, length=length)
+    
     for i in range(10):
         n = m.socket_receive(conn, buffer)
         if n == 4: break
