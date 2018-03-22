@@ -64,7 +64,7 @@ class LTEModule(object):
         self.__pin_disable_module.on()
         self.__pin_wakeup_module.off()
         
-        self.__uart.init(baudrate=115200, flow=pyb.UART.CTS|pyb.UART.RTS, timeout=5000, timeout_char=1000)
+        self.__uart.init(baudrate=115200, timeout=5000, timeout_char=1000)
 
     def set_supply_power(self, to_supply:bool):
         "Enable/Disable power supply to the module."
