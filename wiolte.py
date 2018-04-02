@@ -4,21 +4,19 @@ import pyb
 import machine
 import time
 import uasyncio as asyncio
-from asyn import StopTask, cancellable
-
 
 class WioLTE(object):
     def __init__(self):
         self.__comm = LTEModule()
         
     def initialize(self):
-        pass
+        self.__comm.initialize()
 
     def get_comm(self) -> LTEModule:
         return self.__comm
 
 class LTEModuleError(RuntimeError):
-    def __init__(self, message:str):
+    def __init__(self, message:str) -> None:
         super().__init__(message)
 
 class LTEModule(object):
@@ -66,6 +64,7 @@ class LTEModule(object):
         
         self.__uart.init(baudrate=115200, timeout=5000, timeout_char=1000)
 
+        
     def set_supply_power(self, to_supply:bool):
         "Enable/Disable power supply to the module."
         self.__pin_module_power.value(1 if to_supply else 0)
@@ -82,6 +81,7 @@ class LTEModule(object):
         for trial in range(15):
             if await self.wait_response(b'RDY') is not None:
                 return True
+        self.__l.info("The module did not respond within timeout period.")
         return False
 
     async def wait_busy(self, max_trials:int=50) -> bool:
@@ -102,11 +102,13 @@ class LTEModule(object):
         self.__pin_pwrkey_module.off()
 
         if not await self.wait_busy():
+            self.__l.info("The module is still busy.")
             return False
 
         for trial in range(15):
             if await self.wait_response(b'RDY') is not None:
                 return True
+        self.__l.info("The module did not respond within timeout period.")
         return False
 
     async def turn_on_or_reset(self) -> bool:
@@ -119,10 +121,13 @@ class LTEModule(object):
                 return False
         
         if not await self.write_command_wait(b'AT', b'OK'):    # Check if the module can accept commands.
+            self.__l.info("The module did not respond.")
             return False
         if not await self.write_command_wait(b'ATE0', b'OK'):  # Disable command echo
+            self.__l.info("Failed to disable command echo.")
             return False
-        if not await self.write_command_wait(b'AT+QURCCFG="urcport","uart1"', b'OK'):  # Use UART1 port
+        if not await self.write_command_wait(b'AT+QURCCFG="urcport","uart1"', b'OK'):  # Use UART1 port to receive URC
+            self.__l.info("Failed to configure the module UART port.")
             return False
 
         buffer = bytearray(1024)
@@ -133,6 +138,7 @@ class LTEModule(object):
         self.__l.info('Waiting SIM goes active...')
         while True:
             result, responses = await self.execute_command(b'AT+CPIN?', buffer, timeout=1000)
+            self.__l.info('AT+CPIN result={0}, response={1}'.format(result, len(responses)))
             if len(responses) == 0: return False
             if result: return True
     
@@ -151,11 +157,11 @@ class LTEModule(object):
         response = await self.execute_command_single_response(b'AT+CNUM', b'+CNUM:')
         return str(response[6:], 'utf-8') if response is not None else None
 
-    async def get_RSSI(self) -> int:
+    async def get_RSSI(self) -> Tuple[int,int]:
         "Gets received signal strength indication (RSSI)"
         response = await self.execute_command_single_response(b'AT+CSQ', b'+CSQ:')
         if response is None:
-            return response
+            return None
         try:
             s = str(response[5:], 'utf-8')
             rssi, ber = s.split(',', 2)
@@ -204,11 +210,53 @@ class LTEModule(object):
         
         return True
     
-    async def socket_open(self, host:str, port:int, socket_type:int) -> int:
+    async def get_ip_address(self, host:str, timeout:int=60*1000) -> List[str]:
+        """
+        Get IP address from hostname using DNS.
+
+        :param str host:        An address of the remote host.  
+        :return:                A list of IP addresses corresponding to the hostname.
+        :raises LTEModuleError: If the communication module failed to open a new socket.
+        """
+        assert(host is not None)
+        
+        buffer = bytearray(1024)
+
+        try:
+            # Query host address.
+            self.__l.debug("Querying DNS: {0}".format(host))
+            command = bytes('AT+QIDNSGIP=1,"{0}"'.format(host), 'utf-8')
+            if not await self.write_command_wait(command, b'OK', timeout=timeout):
+                raise LTEModuleError('Failed to get IP.')
+
+            self.__l.debug("Waiting response...")
+            response = await self.wait_response(b'+QIURC: "dnsgip"', timeout=timeout) # type:bytes
+            if response is None:
+                return None
+            self.__l.debug("QIURC: {0}".format(response))
+            fields = str(response, 'utf-8').split(',')
+
+            if len(fields) < 4 or int(fields[1]) != 0:
+                return None
+            count = int(fields[2])
+            ipaddrs = []
+            for i in range(count):
+                mv = await self.wait_response_into(b'+QIURC: "dnsgip",', response_buffer=buffer, timeout=1000)
+                if mv is not None:
+                    ipaddrs.append(str(mv[18:-1], 'utf-8')) # strip double-quote
+            return ipaddrs
+        except ValueError:
+            return None
+
+        except asyncio.CancelledError:
+            pass
+        
+
+    async def socket_open(self, host:str, port:int, socket_type:int, timeout:int=30*1000) -> int:
         """
         Open a new socket to communicate with a host.
 
-        :param str host:        An address of the remote host.
+        :param str host:        An address of the remote host.  
         :param int port:        Port number of the remote host.
         :param int socket_type: Socket type. SOCKET_TCP or SOCKET_UDP
         :return:                Connection ID of opened socket if success. Otherwise raise LTEModuleError.
@@ -249,14 +297,15 @@ class LTEModule(object):
                 raise LTEModuleError('No connection resources available.')
 
             # Open socket.
+            self.__l.info('Connecting[id={0}] {1}:{2}'.format(connect_id, host, port))
             command = bytes('AT+QIOPEN=1,{0},"{1}","{2}",{3},0,0'.format(connect_id, socket_type_name, host, port), 'utf-8')
-            if not await self.write_command_wait(command, b'OK'):
+            if not await self.write_command_wait(command, b'OK', timeout=timeout):
                 raise LTEModuleError('Failed to open socket.')
-            if await self.wait_response(bytes('+QIOPEN: {0},0'.format(connect_id), 'utf-8')) is None:
+            if await self.wait_response(bytes('+QIOPEN: {0},0'.format(connect_id), 'utf-8'), timeout=timeout) is None:
                 raise LTEModuleError('Failed to open socket.')
 
             return connect_id
-        except StopTask:
+        except asyncio.CancelledError:
             pass
 
     async def socket_send(self, connect_id:int, data:bytes, offset:int=0, length:int=None) -> bool:
@@ -317,9 +366,9 @@ class LTEModule(object):
         self.__uart.write(command)
         self.__uart.write('\r')
 
-    async def write_command_wait(self, command:bytes, expected_response:bytes) -> bool:
+    async def write_command_wait(self, command:bytes, expected_response:bytes, timeout:int=None) -> bool:
         self.write_command(command)
-        return await self.wait_response(expected_response) is not None
+        return await self.wait_response(expected_response, timeout=timeout) is not None
 
     async def read_response_into(self, buffer:bytearray, offset:int=0, timeout:int=None) -> int:
         buffer_length = len(buffer)
@@ -369,10 +418,21 @@ class LTEModule(object):
         while True:
             length = await self.read_response_into(response, timeout=timeout)
             if length is None: return None
-            self.__l.debug("wait_response: response=%s", response[:length])
+            self.__l.info("wait_response: response=%s", response[:length])
             if length >= expected_length and response[:expected_length] == expected_response:
                 return response[:length]
     
+    async def wait_response_into(self, expected_response:bytes, response_buffer:bytearray, timeout:int=None) -> memoryview:
+        self.__l.debug('wait_response_into: target=%s', expected_response)
+        expected_length = len(expected_response)
+        mv = memoryview(response_buffer)
+        while True:
+            length = await self.read_response_into(response_buffer, timeout=timeout)
+            if length is None: return None
+            self.__l.info("wait_response_into: response=%s", str(mv[:length], 'utf-8'))
+            if length >= expected_length and mv[:expected_length] == expected_response:
+                return mv[:length]
+
     async def wait_prompt(self, expected_prompt:bytes) -> bool:
         prompt_length = len(expected_prompt)
         index = 0
