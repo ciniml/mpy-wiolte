@@ -4,12 +4,26 @@ import time
 import uasyncio as asyncio
 import _thread
 
+try:
+    from mpy_builtins import *
+    from typing import Tuple, Callable, List
+except:
+    pass
+
 
 AF_INET = const(1)
 SOCK_STREAM = const(0)
 SOCK_DGRAM  = const(1)
 IPPROTO_TCP = const(1)
 IPPROTO_UDP = const(2)
+
+__dns_cache = {}
+
+async def __wrap_async(f):
+    try:
+        return await f()
+    except BaseException as e:
+        return e
 
 class socket(object):
     def __init__(self, af:int=AF_INET, type:int=SOCK_STREAM, proto:int=IPPROTO_TCP):
@@ -20,20 +34,22 @@ class socket(object):
         self.__thread = None
         self.__socket_type = type
 
+    def __run_async(self, f):
+        result = self.__loop.run_until_complete(__wrap_async(f))
+        if isinstance(result, BaseException):
+            raise result
+        return result
+    
     def connect(self, address:Tuple[str,int]):
-        conn = self.__loop.run_until_complete(self.__lte.socket_open(host=address[0], port=address[1], socket_type=self.__socket_type))
+        conn = self.__run_async(lambda: self.__lte.socket_open(host=address[0], port=address[1], socket_type=self.__socket_type, timeout=10000))
         if conn is None:
             raise OSError("Failed to connect")
         self.__conn = conn
         
-    def close(self):
-        # TODO: Implement Close
-        pass
-    
     def send(self, data:bytes) -> int:
         if self.__conn is None:
             raise OSError("Not connected")
-        result = self.__loop.run_until_complete(self.__lte.socket_send(connect_id=self.__conn, data=data))
+        result = self.__run_async(lambda: self.__lte.socket_send(connect_id=self.__conn, data=data, timeout=10000))
         return len(data) if result is not None else 0
 
     def sendall(self, data:bytes):
@@ -41,7 +57,7 @@ class socket(object):
 
     def recv(self, bufsize:int):
         buffer = bytearray(bufsize)
-        length = self.__loop.run_until_complete(self.__lte.socket_receive(connect_id=self.__conn, buffer=buffer))
+        length = self.__run_async(lambda: self.__lte.socket_receive(connect_id=self.__conn, buffer=buffer, timeout=10000))
         mv = memoryview(buffer)
         return mv[:length] if length is not None else mv[:0]
     
@@ -66,7 +82,7 @@ class socket(object):
     def readinto(self, buf:bytearray, nbytes:int=None) -> int:
         nbytes = len(buf) if nbytes is None else nbytes
         mv = memoryview(buf)
-        length = self.__loop.run_until_complete(self.__lte.socket_receive(connect_id=self.__conn, buffer=mv[:nbytes], offset=0))
+        length = self.__run_async(lambda: self.__lte.socket_receive(connect_id=self.__conn, buffer=mv[:nbytes], offset=0))
         return 0 if length is None else length
     
     def write(self, buf:bytes, *args) -> int:
@@ -82,14 +98,21 @@ class socket(object):
         else:
             return self.send(buf)
 
+    def close(self) -> None:
+        self.__run_async(lambda: self.__lte.socket_close(connect_id=self.__conn, timeout=10000))
+
 def getaddrinfo(host:str, port:int, family:int=0, type_:int=0, proto:int=0, flags:int=0):
     import wiolte
     lte = wiolte.wiolte.get_comm()
     loop = asyncio.get_event_loop()
-
+    if host in __dns_cache:
+        return __dns_cache[host]
+    
     ipaddrs = loop.run_until_complete(lte.get_ip_address(host=host))
     addrs = []
     if ipaddrs is not None:
         for ipaddr in ipaddrs:
             addrs.append((family, type_, proto, host, (ipaddr, port)))
+    if len(addrs) > 0:
+        __dns_cache[host] = addrs
     return addrs

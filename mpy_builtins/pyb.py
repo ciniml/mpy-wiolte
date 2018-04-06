@@ -1,3 +1,7 @@
+"""
+pyb module in MicroPython
+"""
+
 from typing import Dict, Tuple, List, Callable
 
 def delay(ms:int)->None:

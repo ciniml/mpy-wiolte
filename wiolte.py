@@ -1,18 +1,26 @@
-# from typing import Tuple, Callable, List
 import logging
 import pyb
 import machine
 import time
 import uasyncio as asyncio
 
+try:
+    from mpy_builtins import *
+    from typing import Tuple, Callable, List
+except:
+    pass
+
 class WioLTE(object):
+    "The WioLTE class to control Wio LTE on-board functions"
     def __init__(self):
         self.__comm = LTEModule()
         
     def initialize(self):
+        "Initialize Wio LTE board "
         self.__comm.initialize()
 
     def get_comm(self) -> LTEModule:
+        "Gets communication module object"
         return self.__comm
 
 class LTEModuleError(RuntimeError):
@@ -42,6 +50,8 @@ class LTEModule(object):
         self.__pin_wakeup_module = pyb.Pin('WAKEUP_IN')
         
         self.__uart = pyb.UART(2)
+        self.__urcs = None
+        self.__connections = []
 
     def initialize(self) -> None:
         "Initialize I/O ports and peripherals to communicate with the module."
@@ -113,6 +123,8 @@ class LTEModule(object):
 
     async def turn_on_or_reset(self) -> bool:
         "Turn on or reset the module and wait until the LTE commucation gets available."
+        self.__urcs = []
+
         if self.is_busy():
             if not await self.turn_on():
                 return False
@@ -140,7 +152,9 @@ class LTEModule(object):
             result, responses = await self.execute_command(b'AT+CPIN?', buffer, timeout=1000)
             self.__l.info('AT+CPIN result={0}, response={1}'.format(result, len(responses)))
             if len(responses) == 0: return False
-            if result: return True
+            if result: 
+                
+                return True
     
     async def get_IMEI(self) -> str:
         "Gets International Mobile Equipment Identity (IMEI)"
@@ -220,6 +234,8 @@ class LTEModule(object):
         """
         assert(host is not None)
         
+        await self.__process_remaining_urcs(timeout=timeout)
+
         buffer = bytearray(1024)
 
         try:
@@ -272,48 +288,65 @@ class LTEModule(object):
             socket_type_name = None
         assert(socket_type_name is not None)
 
+        await self.__process_remaining_urcs(timeout=timeout)
+
         buffer = bytearray(1024)
 
+        # new_connect_id = None
+        # for connect_id in range(LTEModule.MAX_CONNECT_ID):
+        #     if connect_id not in self.__connections:
+        #         new_connect_id = connect_id
+        #         break
+        # if new_connect_id is None:
+        #     raise LTEModuleError('No connection resources available.')
+        
         # Read current connections and find unused connection.
-        try:
-            success, responses = await self.execute_command(b'AT+QISTATE?', buffer)
-            if not success:
-                raise LTEModuleError('Failed to get socket status')
-            connect_id_in_use = set()
-            for response in responses:
-                if len(response) < 10 or response[:10] != b'+QISTATE: ': continue
-                s = str(bytes(response[10:]), 'utf-8')
-                self.__l.debug(s)
-                params = s.split(',',1)
-                connect_id = int(params[0])
-                connect_id_in_use.add(connect_id)
+        success, responses = await self.execute_command(b'AT+QISTATE?', buffer, timeout=timeout)
+        if not success:
+            raise LTEModuleError('Failed to get socket status')
+        connect_id_in_use = set()
+        for response in responses:
+            if len(response) < 10 or response[:10] != b'+QISTATE: ': continue
+            s = str(bytes(response[10:]), 'utf-8')
+            self.__l.info(s)
+            params = s.split(',',1)
+            connect_id = int(params[0])
+            connect_id_in_use.add(connect_id)
+# 
+        new_connect_id = None
+        for connect_id in range(LTEModule.MAX_CONNECT_ID):
+            if connect_id not in connect_id_in_use and connect_id not in self.__connections:
+                new_connect_id = connect_id
+                break
+        if new_connect_id is None:
+            raise LTEModuleError('No connection resources available.')
 
-            new_connect_id = None
-            for connect_id in range(LTEModule.MAX_CONNECT_ID):
-                if connect_id not in connect_id_in_use:
-                    new_connect_id = connect_id
-                    break
-            if new_connect_id is None:
-                raise LTEModuleError('No connection resources available.')
+        # Open socket.
+        self.__l.info('Connecting[id={0}] {1}:{2}'.format(connect_id, host, port))
+        command = bytes('AT+QIOPEN=1,{0},"{1}","{2}",{3},0,0'.format(connect_id, socket_type_name, host, port), 'utf-8')
+        if not await self.write_command_wait(command, b'OK', timeout=timeout):
+            raise LTEModuleError('Failed to open socket. OK')
+        response = await self.wait_response(bytes('+QIOPEN: {0},'.format(connect_id), 'utf-8'), timeout=timeout)
+        if response is None:
+            raise LTEModuleError('Failed to open socket. QIOPEN')
+        error = str(response, 'utf-8').split(',')[1]
+        if error != '0':
+            raise LTEModuleError('Failed to open socket. error={0}'.format(error))
 
-            # Open socket.
-            self.__l.info('Connecting[id={0}] {1}:{2}'.format(connect_id, host, port))
-            command = bytes('AT+QIOPEN=1,{0},"{1}","{2}",{3},0,0'.format(connect_id, socket_type_name, host, port), 'utf-8')
-            if not await self.write_command_wait(command, b'OK', timeout=timeout):
-                raise LTEModuleError('Failed to open socket.')
-            if await self.wait_response(bytes('+QIOPEN: {0},0'.format(connect_id), 'utf-8'), timeout=timeout) is None:
-                raise LTEModuleError('Failed to open socket.')
+        self.__l.info('Connected[id={0}]'.format(connect_id))
+        self.__connections.append(connect_id)
+        return connect_id
+        
 
-            return connect_id
-        except asyncio.CancelledError:
-            pass
-
-    async def socket_send(self, connect_id:int, data:bytes, offset:int=0, length:int=None) -> bool:
+    async def socket_send(self, connect_id:int, data:bytes, offset:int=0, length:int=None, timeout:int=None) -> bool:
         """
         Send a packet to destination.
         """
         assert(0 <= connect_id and connect_id <= LTEModule.MAX_CONNECT_ID)
-
+        await self.__process_remaining_urcs(timeout=timeout)
+        if connect_id not in self.__connections:
+            return False
+        
         length = len(data) if length is None else length
         if length == 0:
             return True
@@ -327,9 +360,12 @@ class LTEModule(object):
         self.__uart.write(mv[offset:offset+length])
         return await self.wait_response(b'SEND OK') is not None
     
-    async def socket_receive(self, connect_id:int, buffer:bytearray, offset:int=0, length:int=None) -> int:
+    async def socket_receive(self, connect_id:int, buffer:bytearray, offset:int=0, length:int=None, timeout:int=None) -> int:
         assert(0 <= connect_id and connect_id <= LTEModule.MAX_CONNECT_ID)
-
+        await self.__process_remaining_urcs(timeout=timeout)
+        if connect_id not in self.__connections:
+            return False
+        
         length = len(buffer) if length is None else length
         if length == 0:
             return True
@@ -337,19 +373,29 @@ class LTEModule(object):
 
         command = bytes('AT+QIRD={0},{1}'.format(connect_id,length), 'utf-8')
         self.write_command(command)
-        response = await self.wait_response(b'+QIRD: ')
+        response = await self.wait_response(b'+QIRD: ', timeout=timeout)
         if response is None:
             return None
         actual_length = int(str(response[7:], 'utf-8'))
         # self.__l.debug('receive length=%d', actual_length)
         if actual_length == 0:
-            return 0 if await self.wait_response(b'OK') is not None else None
+            return 0 if await self.wait_response(b'OK', timeout=timeout) is not None else None
         mv = memoryview(buffer)
         bytes_read = self.__uart.readinto(mv[offset:offset+length], actual_length)
         # self.__l.debug('bytes read=%d', bytes_read)
         # self.__l.debug('bytes=%s', buffer[offset:offset+length])
-        return actual_length if bytes_read == actual_length and await self.wait_response(b'OK') is not None else None
+        return actual_length if bytes_read == actual_length and await self.wait_response(b'OK', timeout=timeout) is not None else None
     
+    async def socket_close(self, connect_id:int, timeout:int=None) -> bool:
+        assert(0 <= connect_id and connect_id <= LTEModule.MAX_CONNECT_ID)
+        if connect_id not in self.__connections:
+            return False
+        self.__l.info('Closing connection {0}'.format(connect_id))
+        command = bytes('AT+QICLOSE={0}'.format(connect_id), 'utf-8')
+        await self.write_command_wait(command, expected_response=b'OK', timeout=timeout)
+        self.__l.info('Closed connection {0}'.format(connect_id))
+        self.__connections.remove(connect_id)
+        return True
     
     def is_busy(self) -> bool:
         return bool(self.__pin_module_status.value())
@@ -370,7 +416,23 @@ class LTEModule(object):
         self.write_command(command)
         return await self.wait_response(expected_response, timeout=timeout) is not None
 
+
     async def read_response_into(self, buffer:bytearray, offset:int=0, timeout:int=None) -> int:
+        while True:
+            length = await self.__read_response_into(buffer=buffer, offset=offset, timeout=timeout)
+            mv = memoryview(buffer)
+            if length is not None and length >= 8 and mv[0:8] == b"+QIURC: ":
+                #self.__l.info("URC: {0}".format(str(mv[:length], 'utf-8')))
+                if length > 17 and mv[8:16] == b'"closed"':
+                    connect_id = int(str(mv[17:length], 'utf-8'))
+                    self.__l.info("Connection {0} closed".format(connect_id))
+                    self.__urcs.append( ("closed", connect_id) )
+                    continue
+            
+            return length
+    
+
+    async def __read_response_into(self, buffer:bytearray, offset:int=0, timeout:int=None) -> int:
         buffer_length = len(buffer)
         response_length = 0
         state = 0
@@ -382,7 +444,7 @@ class LTEModule(object):
                     return None
                 try:
                     await asyncio.sleep_ms(1)
-                except StopTask:
+                except asyncio.CancelledError:
                     return None
                 continue
             
@@ -411,6 +473,12 @@ class LTEModule(object):
             elif state == 4 and c == LTEModule.LF:
                 return response_length
     
+    async def __process_remaining_urcs(self, timeout:int=None):
+        for urc_type, urc_params in self.__urcs:
+            if urc_type == 'closed':
+                await self.socket_close(urc_params, timeout=timeout)
+        self.__urcs.clear()
+    
     async def wait_response(self, expected_response:bytes, max_response_size:int=1024, timeout:int=None) -> bytes:
         self.__l.debug('wait_response: target=%s', expected_response)
         response = bytearray(max_response_size)
@@ -418,7 +486,7 @@ class LTEModule(object):
         while True:
             length = await self.read_response_into(response, timeout=timeout)
             if length is None: return None
-            self.__l.info("wait_response: response=%s", response[:length])
+            self.__l.debug("wait_response: response=%s", response[:length])
             if length >= expected_length and response[:expected_length] == expected_response:
                 return response[:length]
     
@@ -429,7 +497,7 @@ class LTEModule(object):
         while True:
             length = await self.read_response_into(response_buffer, timeout=timeout)
             if length is None: return None
-            self.__l.info("wait_response_into: response=%s", str(mv[:length], 'utf-8'))
+            self.__l.debug("wait_response_into: response=%s", str(mv[:length], 'utf-8'))
             if length >= expected_length and mv[:expected_length] == expected_response:
                 return mv[:length]
 
@@ -448,7 +516,7 @@ class LTEModule(object):
                         return True
                 else:
                     index = 0
-        except StopTask:
+        except asyncio.CancelledError:
             return False
 
     async def execute_command(self, command:bytes, response_buffer:bytearray, index:int=0, expected_response_predicate:Callable[[memoryview],bool]=None, expected_response_list:List[bytes]=[b'OK'], timeout:int=None) -> Tuple[bool, List[memoryview]]:

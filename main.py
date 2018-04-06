@@ -2,8 +2,13 @@ from wiolte import LTEModule
 import pyb
 import logging
 import struct
-from asyn import cancellable
 import uasyncio as asyncio
+
+try:
+    from mpy_builtins import *
+    from typing import Tuple, Callable, List
+except:
+    pass
 
 def reset():
     pyb.sync()
