@@ -183,11 +183,11 @@ class LTEModule(object):
         except ValueError:
             return None
     
-    async def activate(self, access_point:str, user:str, password:str) -> bool:
+    async def activate(self, access_point:str, user:str, password:str, timeout:int=None) -> bool:
         self.__l.info("Activating network...")
         while True:
             # Read network registration status.
-            response = await self.execute_command_single_response(b'AT+CGREG?', b'+CGREG:')
+            response = await self.execute_command_single_response(b'AT+CGREG?', b'+CGREG:', timeout)
             if response is None:
                 raise LTEModuleError('Failed to get registration status.')
             s = str(response, 'utf-8')
@@ -199,7 +199,7 @@ class LTEModule(object):
                 break
             
             # Read EPS network registration status
-            response = await self.execute_command_single_response(b'AT+CEREG?', b'+CEREG:')
+            response = await self.execute_command_single_response(b'AT+CEREG?', b'+CEREG:', timeout)
             if response is None:
                 raise LTEModuleError('Failed to get registration status.')
             s = str(response, 'utf-8')
@@ -214,12 +214,12 @@ class LTEModule(object):
         # context_type  : IPv4 = 1, IPv4/v6 = 2
         # authentication: None = 0, PAP = 1, CHAP = 2, PAP or CHAP = 3
         command = bytes('AT+QICSGP=1,1,"{0}","{1}","{2}",1'.format(access_point, user, password), 'utf-8')
-        if not await self.write_command_wait(command, b'OK'):
+        if not await self.write_command_wait(command, b'OK', timeout):
             return False
         # Activate a PDP context
-        if not await self.write_command_wait(b'AT+QIACT=1', b'OK'):
+        if not await self.write_command_wait(b'AT+QIACT=1', b'OK', timeout):
             return False
-        if not await self.write_command_wait(b'AT+QIACT?', b'OK'):
+        if not await self.write_command_wait(b'AT+QIACT?', b'OK', timeout):
             return False
         
         return True
@@ -354,11 +354,11 @@ class LTEModule(object):
 
         command = bytes('AT+QISEND={0},{1}'.format(connect_id, length), 'utf-8')
         self.write_command(command)
-        if not await self.wait_prompt(b'> '):
+        if not await self.wait_prompt(b'> ', timeout=timeout):
             return False
         mv = memoryview(data)
         self.__uart.write(mv[offset:offset+length])
-        return await self.wait_response(b'SEND OK') is not None
+        return await self.wait_response(b'SEND OK', timeout=timeout) is not None
     
     async def socket_receive(self, connect_id:int, buffer:bytearray, offset:int=0, length:int=None, timeout:int=None) -> int:
         assert(0 <= connect_id and connect_id <= LTEModule.MAX_CONNECT_ID)
@@ -397,6 +397,9 @@ class LTEModule(object):
         self.__connections.remove(connect_id)
         return True
     
+    def socket_is_connected(self, connect_id:int) -> bool:
+        return connect_id in self.__connections and ("closed", connect_id) not in self.__urcs
+
     def is_busy(self) -> bool:
         return bool(self.__pin_module_status.value())
 
@@ -501,24 +504,25 @@ class LTEModule(object):
             if length >= expected_length and mv[:expected_length] == expected_response:
                 return mv[:length]
 
-    async def wait_prompt(self, expected_prompt:bytes) -> bool:
+    async def wait_prompt(self, expected_prompt:bytes, timeout:int=None) -> bool:
         prompt_length = len(expected_prompt)
         index = 0
-        try:
-            while True:
-                c = self.__uart.readchar()
-                if c < 0:
-                    await asyncio.sleep_ms(1)
-                    continue
-                if expected_prompt[index] == c:
-                    index += 1
-                    if index == prompt_length:
-                        return True
-                else:
-                    index = 0
-        except asyncio.CancelledError:
-            return False
-
+        start_time_ms = time.ticks_ms()
+    
+        while True:
+            c = self.__uart.readchar()
+            if c < 0:
+                if time.ticks_ms() - start_time_ms > timeout:
+                    return False
+                await asyncio.sleep_ms(1)
+                continue
+            if expected_prompt[index] == c:
+                index += 1
+                if index == prompt_length:
+                    return True
+            else:
+                index = 0
+        
     async def execute_command(self, command:bytes, response_buffer:bytearray, index:int=0, expected_response_predicate:Callable[[memoryview],bool]=None, expected_response_list:List[bytes]=[b'OK'], timeout:int=None) -> Tuple[bool, List[memoryview]]:
         assert expected_response_predicate is not None or expected_response_list is not None
         if expected_response_predicate is None:
