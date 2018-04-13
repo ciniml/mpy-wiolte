@@ -1,28 +1,39 @@
 import logging
-import pyb
-import machine
 import time
 import uasyncio as asyncio
 
 try:
-    from mpy_builtins import *
+    from mpy_builtins import machine, pyb, const
     from typing import Tuple, Callable, List
 except:
-    pass
+    import pyb
+    import machine
+
 
 class WioLTE(object):
     "The WioLTE class to control Wio LTE on-board functions"
     def __init__(self):
+        self.__l = logging.Logger("WioLTE")
+
         self.__comm = LTEModule()
+        
+        self.__pin_grove_power = pyb.Pin('GRO_POWR')
         
     def initialize(self):
         "Initialize Wio LTE board "
+        self.__pin_grove_power.init(pyb.Pin.OUT_PP)
+        self.__pin_grove_power.off()
+
         self.__comm.initialize()
 
     def get_comm(self) -> LTEModule:
         "Gets communication module object"
         return self.__comm
 
+    def set_grove_power(self, turn_on:bool):
+        "Turn on or off the power supply of Grove connectors."
+        self.__pin_grove_power.value(turn_on)
+    
 class LTEModuleError(RuntimeError):
     def __init__(self, message:str) -> None:
         super().__init__(message)
