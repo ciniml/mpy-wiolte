@@ -1,8 +1,10 @@
-from wiolte import LTEModule
+from wiolte import wiolte, LTEModule
+from sht31 import SHT31
 import pyb
 import logging
 import struct
 import uasyncio as asyncio
+import time
 
 try:
     from mpy_builtins import *
@@ -15,11 +17,35 @@ def reset():
     machine.soft_reset()
 
 logging.basicConfig(logging.DEBUG)
+l = logging.Logger('MAIN')
 
-m = LTEModule()
-m.initialize()
+# Initialize Wio LTE module
+wiolte.initialize()
+wiolte.set_grove_power(False)
+time.sleep(1)
+wiolte.set_grove_power(True)
+
+# Initialize LTE modem
+m = wiolte.get_comm()
+
 m.set_supply_power(True)
 
+# Initialize humidity sensor
+i2c = machine.I2C(1)
+address_sht31 = i2c.scan()
+if len(address_sht31) > 0:
+    l.info("Found SHT31 at address %02x", address_sht31[0])
+    sensor_sht = SHT31(i2c, address_sht31[0])
+    sensor_sht.stop_measurement()
+    if not sensor_sht.reset():
+        l.error("Failed to reset SHT31")
+    if not sensor_sht.set_heater(True):
+        l.error("Failed to enable heater of SHT31")
+    if not sensor_sht.start_measurement(repeatability=SHT31.REPEATABILITY_MEDIUM, mps=SHT31.MPS_10):
+        l.error("Failed to start SHT31 measurement")
+        sensor_sht = None
+else:
+    l.error("Failed to detect SHT31")
 
 def put_string(buffer:memoryview, length:int, utf8:bytes) -> int:
     struct.pack_into('>H', buffer, 0, length)
@@ -118,7 +144,7 @@ class ConnectFlags(object):
     CleanSession = const(0x02)
 
 
-def make_connect(buffer:bytearray, client_name:str, user_name:str=None, password:str=None) -> int:
+def make_connect(buffer:bytearray, client_name:str, user_name:str=None, password:str=None, keep_alive:int=10) -> int:
     client_name_bytes = bytes(client_name, 'utf-8')
     client_name_length = len(client_name_bytes) + 2
     user_name_bytes = bytes(user_name, 'utf-8') if user_name is not None else None
@@ -136,7 +162,7 @@ def make_connect(buffer:bytearray, client_name:str, user_name:str=None, password
     i += put_string(mv[i:], 4, b'MQTT')
     mv[i] = 4; i += 1        # Protocol Version
     mv[i] = flags; i += 1    # Flags
-    struct.pack_into('>H', mv, i, 0x000a); i += 2   # Keep Alive
+    struct.pack_into('>H', mv, i, keep_alive); i += 2   # Keep Alive
     i += put_string(mv[i:], client_name_length-2, client_name_bytes)  # Client Name
     if user_name_bytes is not None:
         i += put_string(mv[i:], user_name_length-2, user_name_bytes)    # User Name
@@ -188,7 +214,7 @@ async def main_task():
             conn = await m.socket_open('beam.soracom.io', 1883, m.SOCKET_TCP)
             log.info('Connection to SORACOM Beam = {0}'.format(conn))
     
-            length = make_connect(buffer, "wiolte")
+            length = make_connect(buffer, client_name="wiolte", keep_alive=120)
             log.debug("CONNECT: %s", buffer[:length])
             if not await m.socket_send(conn, buffer, offset=0, length=length, timeout=1000):
                 await m.socket_close(conn, timeout=1000)
@@ -218,11 +244,17 @@ async def main_task():
                 await asyncio.sleep_ms(5000)
 
         while m.socket_is_connected(conn):
-            length = make_publish(buffer, 'devices/wiolte/messages/events/', b'Hello from MicroPython on WioLTE')
-            if not await m.socket_send(conn, buffer, length=length):
-                break
-            await asyncio.sleep_ms(5000)
-    
+            if sensor_sht is not None:
+                sensor_value = sensor_sht.read()
+                if sensor_value[0] is not None:
+                    payload = '{{"temperature":{0},"humidity":{1}}}'.format(*sensor_value)
+                    length = make_publish(buffer, 'devices/wiolte/messages/events/', bytes(payload, 'utf-8'))
+                    if not await m.socket_send(conn, buffer, length=length, timeout=5000):
+                        break
+            await asyncio.sleep_ms(30000)
+
+        await m.socket_close(conn)
+        
 loop = asyncio.get_event_loop()
 loop.run_until_complete(main_task())
 
