@@ -1,5 +1,6 @@
 from wiolte import wiolte, LTEModule
 from sht31 import SHT31
+from bmp280 import BMP280
 import pyb
 import logging
 import struct
@@ -27,15 +28,23 @@ wiolte.set_grove_power(True)
 
 # Initialize LTE modem
 m = wiolte.get_comm()
-
 m.set_supply_power(True)
 
-# Initialize humidity sensor
+# Initialize barometer sensor
 i2c = machine.I2C(1)
-address_sht31 = i2c.scan()
+sensor_bmp = BMP280(i2c, 0x77)
+sensor_bmp.reset()
+sensor_bmp.configure()
+
+# Initialize humidity sensor
+pin_d38 = pyb.Pin('D38')    # D38:SCL
+pin_d39 = pyb.Pin('D39')    # D39:SDA
+i2c_d38 = machine.I2C(scl=pin_d38, sda=pin_d39)
+
+address_sht31 = i2c_d38.scan()
 if len(address_sht31) > 0:
     l.info("Found SHT31 at address %02x", address_sht31[0])
-    sensor_sht = SHT31(i2c, address_sht31[0])
+    sensor_sht = SHT31(i2c_d38, address_sht31[0])
     sensor_sht.stop_measurement()
     if not sensor_sht.reset():
         l.error("Failed to reset SHT31")
@@ -181,13 +190,13 @@ def make_publish(buffer:bytearray, topic:str, payload:bytes=None, payload_length
     topic_bytes = bytes(topic, 'utf-8')
     topic_length = len(topic_bytes)
     payload_length = 0 if payload is None else (len(payload) if payload_length is None else payload_length)
-    remaining_length = topic_length + 2 + (payload_length + 2 if payload_length > 0 else 0)
+    remaining_length = topic_length + 2 + payload_length
 
     mv = memoryview(buffer)
     i = 0
     i += put_fixed_header(mv[i:], ControlPacketType.PUBLISH, 0, remaining_length)
     i += put_string(mv[i:], topic_length, topic_bytes)
-    i += put_string(mv[i:], payload_length, payload)
+    mv[i:i+payload_length] = payload
     
     return remaining_length + 2
 
@@ -244,13 +253,19 @@ async def main_task():
                 await asyncio.sleep_ms(5000)
 
         while m.socket_is_connected(conn):
-            if sensor_sht is not None:
-                sensor_value = sensor_sht.read()
-                if sensor_value[0] is not None:
-                    payload = '{{"temperature":{0},"humidity":{1}}}'.format(*sensor_value)
-                    length = make_publish(buffer, 'devices/wiolte/messages/events/', bytes(payload, 'utf-8'))
-                    if not await m.socket_send(conn, buffer, length=length, timeout=5000):
-                        break
+            sht_value = sensor_sht.read() if sensor_sht is not None else None
+            bmp_value = sensor_bmp.read() if sensor_bmp is not None else None
+
+            temperature = sht_value[0] if sht_value is not None else 'null'
+            humidity    = sht_value[1] if sht_value is not None else 'null'
+            pressure    = bmp_value[0] if bmp_value is not None else 'null'
+            temperature = bmp_value[1] if bmp_value is not None else temperature
+
+            payload = '{{"temperature":{0},"humidity":{1},"pressure":{2}}}'.format(temperature, humidity, pressure)
+            length = make_publish(buffer, 'devices/wiolte/messages/events/', bytes(payload, 'utf-8'))
+            if not await m.socket_send(conn, buffer, length=length, timeout=5000):
+                break
+            
             await asyncio.sleep_ms(30000)
 
         await m.socket_close(conn)
