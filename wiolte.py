@@ -56,7 +56,7 @@ class LTEModule(object):
         self.__pin_dtr_module = pyb.Pin('DTR_MODULE')
         self.__pin_pwrkey_module = pyb.Pin('PWRKEY_MODULE')
         self.__pin_module_power = pyb.Pin('M_POWR')
-        self.__pin_module_status = pyb.Pin('PB15')
+        self.__pin_module_status = pyb.Pin('STATUS')
         self.__pin_disable_module = pyb.Pin('W_DISABLE')
         self.__pin_wakeup_module = pyb.Pin('WAKEUP_IN')
         
