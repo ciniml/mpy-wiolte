@@ -208,7 +208,8 @@ class LTEModule(object):
                 raise LTEModuleError('Invalid registration status.')
             elif stat == '1' or stat == '5': # Registered.
                 break
-            
+        
+        while True:
             # Read EPS network registration status
             response = await self.execute_command_single_response(b'AT+CEREG?', b'+CEREG:', timeout)
             if response is None:

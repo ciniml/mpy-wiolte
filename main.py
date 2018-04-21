@@ -6,6 +6,7 @@ import logging
 import struct
 import uasyncio as asyncio
 import time
+import gc
 
 try:
     from mpy_builtins import *
@@ -262,10 +263,12 @@ async def main_task():
             temperature = bmp_value[1] if bmp_value is not None else temperature
 
             payload = '{{"temperature":{0},"humidity":{1},"pressure":{2}}}'.format(temperature, humidity, pressure)
+            log.info("PUBLISH: %s", payload)
             length = make_publish(buffer, 'devices/wiolte/messages/events/', bytes(payload, 'utf-8'))
             if not await m.socket_send(conn, buffer, length=length, timeout=5000):
                 break
             
+            gc.collect()
             await asyncio.sleep_ms(30000)
 
         await m.socket_close(conn)
